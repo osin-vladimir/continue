@@ -1,4 +1,5 @@
-import { AzureKeyCredential, OpenAIClient } from "@azure/openai";
+import { AzureCliCredential, getBearerTokenProvider } from "@azure/identity";
+import { AzureOpenAI } from "openai";
 
 import dotenv from "dotenv";
 import {
@@ -32,7 +33,7 @@ const HTTP_PROXY = process.env.HTTP_PROXY;
 const MS_TOKEN = 30;
 
 export class AzureOpenAIApi implements BaseLlmApi {
-  private client: OpenAIClient;
+  private client: AzureOpenAI;
 
   constructor(private config: AzureConfig) {
     let proxyOptions;
@@ -47,17 +48,21 @@ export class AzureOpenAIApi implements BaseLlmApi {
       };
     }
 
-    if (!config.apiBase || !config.apiKey) {
-      throw new Error("Azure OpenAI API requires apiBase and apiKey");
+    if (!config.apiBase) {
+      throw new Error("Azure OpenAI API requires apiBase");
     }
 
-    this.client = new OpenAIClient(
-      config.apiBase,
-      new AzureKeyCredential(config.apiKey),
-      {
-        proxyOptions,
-      },
-    );
+    // Use DefaultAzureCredential, which will use managed identity if running in Azure
+    // TODO: playing with AzureCliCredential for now
+    const credential = new AzureCliCredential();
+    const scope = "https://cognitiveservices.azure.com/.default";
+    const azureADTokenProvider = getBearerTokenProvider(credential, scope);
+
+    this.client = new AzureOpenAI({ 
+      azureADTokenProvider: azureADTokenProvider, 
+      apiVersion: "2025-01-01-preview",
+      baseURL: config.apiBase
+    });
   }
 
   private _bodyToOptions(
@@ -82,27 +87,33 @@ export class AzureOpenAIApi implements BaseLlmApi {
     body: ChatCompletionCreateParamsNonStreaming,
     signal: AbortSignal,
   ): Promise<ChatCompletion> {
-    const completion = await this.client.getChatCompletions(
-      body.model,
-      body.messages,
-      this._bodyToOptions(body, signal),
-    );
+
+    const completion = await this.client.chat.completions.create({
+      model: body.model,
+      messages: body.messages,
+      max_tokens: body.max_tokens,
+      temperature: body.temperature,
+      top_p: body.top_p,
+      frequency_penalty: body.frequency_penalty,
+      presence_penalty: body.presence_penalty
+    });
+
     return {
       ...completion,
       object: "chat.completion",
       model: body.model,
-      created: completion.created.getTime(),
+      created: completion.created,
       usage: completion.usage
         ? {
-            total_tokens: completion.usage.totalTokens,
-            completion_tokens: completion.usage.completionTokens,
-            prompt_tokens: completion.usage.promptTokens,
+            total_tokens: completion.usage.total_tokens,
+            completion_tokens: completion.usage.completion_tokens,
+            prompt_tokens: completion.usage.prompt_tokens,
           }
         : undefined,
       choices: completion.choices.map((choice) => ({
         ...choice,
         logprobs: null,
-        finish_reason: "stop",
+        finish_reason:choice.finish_reason,
         message: {
           role: "assistant",
           content: choice.message?.content ?? null,
@@ -111,15 +122,22 @@ export class AzureOpenAIApi implements BaseLlmApi {
       })),
     };
   }
+
   async *chatCompletionStream(
     body: ChatCompletionCreateParamsStreaming,
     signal: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk> {
-    const events = await this.client.streamChatCompletions(
-      body.model,
-      body.messages,
-      this._bodyToOptions(body, signal),
-    );
+
+    const events = await this.client.chat.completions.create({
+      model: body.model,
+      messages: body.messages,
+      max_tokens: body.max_tokens,
+      temperature: body.temperature,
+      top_p: body.top_p,
+      frequency_penalty: body.frequency_penalty,
+      presence_penalty: body.presence_penalty,
+      stream: true
+    });
 
     const eventBuffer: ChatCompletionChunk[] = [];
     let done = false;
@@ -131,7 +149,7 @@ export class AzureOpenAIApi implements BaseLlmApi {
           ...event,
           object: "chat.completion.chunk",
           model: body.model,
-          created: event.created.getTime(),
+          created: event.created,
           choices: event.choices.map((choice: any) => ({
             ...choice,
             logprobs: undefined,
@@ -166,13 +184,13 @@ export class AzureOpenAIApi implements BaseLlmApi {
       } else if (eventBuffer.length > 40) {
         await new Promise((resolve) => setTimeout(resolve, ms / 2));
       } else {
-        // await new Promise((resolve) => setTimeout(resolve, Math.max(25, 50 - 2 * eventBuffer.length)));
         await new Promise((resolve) => setTimeout(resolve, ms));
       }
     }
 
     for (const event of eventBuffer) yield event;
   }
+
   async completionNonStream(
     body: CompletionCreateParamsNonStreaming,
     signal: AbortSignal,
@@ -202,6 +220,7 @@ export class AzureOpenAIApi implements BaseLlmApi {
       })),
     };
   }
+
   async *completionStream(
     body: CompletionCreateParamsStreaming,
     signal: AbortSignal,
@@ -237,6 +256,7 @@ export class AzureOpenAIApi implements BaseLlmApi {
       };
     }
   }
+
   fimStream(
     body: FimCreateParamsStreaming,
   ): AsyncGenerator<ChatCompletionChunk> {
@@ -246,18 +266,13 @@ export class AzureOpenAIApi implements BaseLlmApi {
   }
 
   async embed(body: EmbeddingCreateParams): Promise<CreateEmbeddingResponse> {
-    const input = typeof body.input === "string" ? [body.input] : body.input;
-    const response = await this.client.getEmbeddings(body.model, input as any, {
-      dimensions: body.dimensions,
-      model: body.model,
-    });
-
+    const response = await this.client.embeddings.create(body);
     const output = embedding({
       data: response.data.map((item) => item.embedding),
       model: body.model,
       usage: {
-        prompt_tokens: response.usage.promptTokens,
-        total_tokens: response.usage.totalTokens,
+        prompt_tokens: response.usage.prompt_tokens,
+        total_tokens: response.usage.total_tokens,
       },
     });
 
