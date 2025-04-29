@@ -30,12 +30,14 @@ fi
 echo "Installing root-level dependencies..."
 npm install
 
+# build openai-adapters 
+
 echo "Installing Core extension dependencies..."
 pushd core
 ## This flag is set because we pull down Chromium at runtime
 export PUPPETEER_SKIP_DOWNLOAD='true'
 npm install
-npm link
+npm link  # like installing current package in editable node
 
 popd
 

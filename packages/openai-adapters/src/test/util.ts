@@ -74,6 +74,7 @@ export function testFim(api: BaseLlmApi, model: string) {
 }
 
 export function testChat(api: BaseLlmApi, model: string) {
+  
   test("should successfully stream chat", async () => {
     const stream = api.chatCompletionStream(
       {
